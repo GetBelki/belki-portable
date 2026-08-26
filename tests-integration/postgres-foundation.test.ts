@@ -115,12 +115,18 @@ integration("PostgreSQL portable foundation", () => {
       { headers: { cookie: authenticatedHeaders.cookie } },
     );
     expect(promptPage.status).toBe(200);
-    await expect(promptPage.json()).resolves.toMatchObject({
-      page: { total: 2 },
-      data: [
-        { latestSnapshotId: null, tags: [{ name: "Onboarding" }] },
-      ],
-    });
+    const promptPayload = await promptPage.json() as {
+      page: { total: number };
+      data: Array<{ latestSnapshotId: string | null; tags: Array<{ name: string }> }>;
+    };
+    expect(promptPayload.page.total).toBe(2);
+    expect(promptPayload.data).toHaveLength(2);
+    for (const prompt of promptPayload.data) {
+      expect(prompt).toMatchObject({
+        latestSnapshotId: null,
+        tags: [{ name: "Onboarding" }],
+      });
+    }
 
     const session = await app.request("/api/v1/auth/session", {
       headers: { cookie: authenticatedHeaders.cookie },
