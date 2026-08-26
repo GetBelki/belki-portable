@@ -1,0 +1,25 @@
+:80 {
+  encode zstd gzip
+
+  handle /oauth2/* {
+    reverse_proxy oauth2-proxy:4180
+  }
+
+  @operator path /operator* /api/v1/operator*
+  handle @operator {
+    forward_auth oauth2-proxy:4180 {
+      uri /oauth2/auth
+      copy_headers X-Auth-Request-User X-Auth-Request-Email
+    }
+    reverse_proxy web:3000 {
+      header_up X-Belki-Proxy-Secret {$OIDC_TRUST_SECRET}
+    }
+  }
+
+  handle {
+    reverse_proxy web:3000 {
+      header_up -X-Auth-Request-Email
+      header_up -X-Belki-Proxy-Secret
+    }
+  }
+}

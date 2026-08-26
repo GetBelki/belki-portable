@@ -1,0 +1,13 @@
+.git
+.github
+.pnpm-store
+node_modules
+dist
+coverage
+.env*
+!.env.example
+*.log
+playwright-report
+test-results
+belki-logo.png
+brand-reputation-prompt-templates.md

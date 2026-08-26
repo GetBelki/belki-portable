@@ -1,0 +1,14 @@
+DROP TABLE IF EXISTS worker_heartbeats;
+DROP TABLE IF EXISTS usage_resource_claims;
+DROP TABLE IF EXISTS usage_reservations;
+DROP TABLE IF EXISTS usage_entitlements;
+DROP TABLE IF EXISTS rate_limits;
+DROP TABLE IF EXISTS audit_log;
+DROP TABLE IF EXISTS billing_accounts;
+DROP TABLE IF EXISTS projects;
+DROP TABLE IF EXISTS platform_operators;
+DROP TABLE IF EXISTS sessions;
+DROP TABLE IF EXISTS memberships;
+DROP TABLE IF EXISTS password_credentials;
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS workspaces;

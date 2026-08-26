@@ -1,0 +1,69 @@
+name: belki
+
+x-belki-app: &belki-app
+  image: ${BELKI_IMAGE:-ghcr.io/getbelki/belki-portable:local}
+  build:
+    context: .
+  env_file:
+    - path: .env
+      required: false
+  environment: &belki-environment
+    NODE_ENV: production
+    HOST: 0.0.0.0
+    PORT: 3000
+  networks:
+    - private
+  restart: unless-stopped
+
+services:
+  gateway:
+    image: caddy:2.11.4-alpine
+    ports:
+      - "${BELKI_HTTP_PORT:-8080}:80"
+    volumes:
+      - ./deployment/Caddyfile:/etc/caddy/Caddyfile:ro
+    networks:
+      - public
+      - private
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+
+  migrate:
+    <<: *belki-app
+    command: ["node", "dist/server/migrate.js"]
+    restart: "no"
+
+  web:
+    <<: *belki-app
+    environment:
+      <<: *belki-environment
+    command: ["node", "dist/server/server.js"]
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    <<: *belki-app
+    environment:
+      <<: *belki-environment
+    command: ["node", "dist/server/worker.js"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+networks:
+  public:
+  private:
+    internal: true

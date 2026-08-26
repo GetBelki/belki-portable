@@ -1,0 +1,14 @@
+:80 {
+  encode zstd gzip
+
+  handle_path /mailpit/* {
+    reverse_proxy mailpit:8025
+  }
+
+  handle {
+    reverse_proxy web:3000 {
+      header_up -X-Auth-Request-Email
+      header_up -X-Belki-Proxy-Secret
+    }
+  }
+}

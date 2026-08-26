@@ -1,0 +1,7 @@
+services:
+  migrate:
+    build: null
+  web:
+    build: null
+  worker:
+    build: null

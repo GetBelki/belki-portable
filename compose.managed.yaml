@@ -1,0 +1,27 @@
+services:
+  gateway:
+    volumes:
+      - ./deployment/Caddyfile.managed:/etc/caddy/Caddyfile:ro
+    environment:
+      OIDC_TRUST_SECRET: ${OIDC_TRUST_SECRET:?Set OIDC_TRUST_SECRET}
+    depends_on:
+      oauth2-proxy:
+        condition: service_started
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.3
+    environment:
+      OAUTH2_PROXY_PROVIDER: oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:?Set OIDC_ISSUER_URL}
+      OAUTH2_PROXY_CLIENT_ID: ${OIDC_CLIENT_ID:?Set OIDC_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:?Set OIDC_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OIDC_COOKIE_SECRET:?Set OIDC_COOKIE_SECRET}
+      OAUTH2_PROXY_REDIRECT_URL: ${APP_BASE_URL:?Set APP_BASE_URL}/oauth2/callback
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_UPSTREAMS: static://202
+    networks:
+      - private
+    restart: unless-stopped

@@ -1,0 +1,958 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  AlertTriangle,
+  CalendarDays,
+  Check,
+  Gauge,
+  ReceiptText,
+} from "lucide-react";
+import { useSearchParams } from "react-router-dom";
+import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { useEffect, useState } from "react";
+import { TRACKING_SOURCE_LABELS, type TrackingSource } from "../../shared/tracking-sources";
+import { NoProject, PageHeader } from "../components/layout";
+import { Button, Card, CardHeader, DataTable, Dialog, EmptyState, Input, Label, Select, Skeleton } from "../components/ui";
+import { useApp } from "../context";
+import { ApiClientError, api, patch, post, remove } from "../lib/api";
+import { formatProviderCost } from "../lib/snapshot-evidence";
+import { onboardingDestination } from "../lib/onboarding-navigation";
+import { compact } from "../lib/utils";
+import { shortChartDate } from "../lib/trend-chart";
+
+type BillingPeriod = "30d" | "month";
+
+interface BillingReport {
+  period: BillingPeriod;
+  projectId: string | null;
+  currency: "USD";
+  range: { from: string; to: string };
+  summary: {
+    totalCost: number;
+    chargedTasks: number;
+    chargedRuns: number;
+    averageCost: number;
+    highestDailyCost: number;
+    byCategory: {
+      promptTracking: BillingCategory;
+      productEnrichment: BillingCategory;
+      entityExtraction: BillingCategory;
+    };
+    promptTrackingBreakdown: {
+      standard: BillingCategory;
+      highPriority: BillingCategory;
+      live: BillingCategory;
+      retainedPages: BillingCategory;
+      bySource: Array<{
+        source: TrackingSource | "deleted_project";
+        chargedTasks: number;
+        totalCost: number;
+        failedChargedTasks: number;
+        failedCost: number;
+      }>;
+      providerChargedFailures: {
+        chargedTasks: number;
+        totalCost: number;
+      };
+    };
+  };
+  series: Array<{
+    date: string;
+    totalCost: number;
+    promptTrackingCost: number;
+    promptTrackingStandardCost: number;
+    promptTrackingHighPriorityCost: number;
+    promptTrackingLiveCost: number;
+    productEnrichmentCost: number;
+    entityExtractionCost: number;
+    totalTasks: number;
+    promptTrackingTasks: number;
+    promptTrackingStandardTasks: number;
+    promptTrackingHighPriorityTasks: number;
+    promptTrackingLiveTasks: number;
+    productEnrichmentTasks: number;
+    entityExtractionTasks: number;
+  }>;
+  projectBreakdown: Array<{
+    projectId: string;
+    projectName: string;
+    totalCost: number;
+    chargedTasks: number;
+    promptTrackingCost: number;
+    promptTrackingStandardCost: number;
+    promptTrackingHighPriorityCost: number;
+    promptTrackingLiveCost: number;
+    promptTrackingStandardTasks: number;
+    promptTrackingHighPriorityTasks: number;
+    promptTrackingLiveTasks: number;
+    retainedPageCost: number;
+    retainedPageTasks: number;
+    productEnrichmentCost: number;
+    entityExtractionCost: number;
+  }>;
+  projectAlerts: Array<{
+    projectId: string;
+    projectName: string;
+    category: "productEnrichment" | "entityExtraction";
+    monthToDateTasks: number;
+    monthToDateCost: number;
+    threshold: number;
+    exceeded: boolean;
+    estimated: boolean;
+  }>;
+}
+
+interface BillingAlerts {
+  productEnrichment: BillingAlert;
+  entityExtraction: BillingAlert;
+}
+
+interface BillingAlert {
+  threshold: number;
+  monthToDateTasks: number;
+  monthToDateCost: number;
+  exceeded: boolean;
+  estimated: boolean;
+}
+
+interface BillingCategory {
+  chargedTasks: number;
+  totalCost: number;
+  averageCost: number;
+  sharePercent: number;
+}
+
+interface ManagedBillingSummary {
+  planKey: string;
+  subscriptionStatus: string;
+  paymentMode: "disabled" | "stripe_managed" | "stripe_direct";
+  stripeEnvironment: "test" | "live" | null;
+  configuredStripeEnvironment: "test" | "live" | null;
+  planChangesEnabled: boolean;
+  planChangeDisabledReason: string | null;
+  cycleStartedAt: string;
+  cycleEndsAt: string;
+  cancelAtPeriodEnd: boolean;
+  readOnlyUntil: string | null;
+  currentProjectLimit: number;
+  currentPromptLimit: number;
+  currentSourceLimit: number;
+  availableTrackingSources: TrackingSource[];
+  usage: {
+    allowance: number;
+    committed: number;
+    reserved: number;
+    remaining: number;
+    projectCount: number;
+    projectLimit: number;
+    promptCount: number;
+    promptLimit: number;
+    sourceLimit: number;
+  };
+  pendingPlanChange: {
+    id: string;
+    kind: "upgrade" | "downgrade";
+    status: string;
+    fromPlanKey: ManagedPlanKey;
+    toPlanKey: ManagedPlanKey;
+    effectiveAt: string | null;
+    transition: PlanTransitionPreview | null;
+  } | null;
+  plans: Array<{
+    key: ManagedPlanKey;
+    priceEur: number;
+    monthlyUnits: number;
+    projectLimit: number;
+    promptLimit: number;
+    sourceLimit: number;
+    changeKind: "checkout" | "current" | "upgrade" | "downgrade";
+  }>;
+}
+
+interface PlanTransitionPreview {
+  targetPlanKey: ManagedPlanKey;
+  effectiveAt: string;
+  archivedProjects: Array<{ id: string; name: string }>;
+  pausedPromptCount: number;
+  sourceChanges: Array<{
+    projectId: string;
+    projectName: string;
+    current: TrackingSource[];
+    next: TrackingSource[];
+  }>;
+}
+
+type ManagedPlanKey = "starter" | "studio" | "agency";
+
+function planLabel(plan: ManagedPlanKey): string {
+  return plan.charAt(0).toUpperCase() + plan.slice(1);
+}
+
+function billingError(...errors: Array<unknown>): string | null {
+  const error = errors.find(Boolean);
+  if (!error) return null;
+  return error instanceof ApiClientError ? error.message : "Billing could not be updated. Try again or contact support.";
+}
+
+function ManagedBillingPanel({
+  summary,
+  summaryPending,
+}: {
+  summary: ManagedBillingSummary | undefined;
+  summaryPending: boolean;
+}) {
+  const { session } = useApp();
+  const queryClient = useQueryClient();
+  const [billingParams, setBillingParams] = useSearchParams();
+  const [selectedPlan, setSelectedPlan] = useState<ManagedPlanKey | null>(null);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const processing = billingParams.get("checkout") === "success" || billingParams.get("plan_change") === "processing" || billingParams.get("cancellation") === "processing";
+  const checkout = useMutation({
+    mutationFn: (planKey: ManagedPlanKey) =>
+      post<{ url: string }>("/billing/checkout", { planKey }),
+    onSuccess: ({ url }) => window.location.assign(url),
+  });
+  const portal = useMutation({
+    mutationFn: () => post<{ url: string }>("/billing/management-session"),
+    onSuccess: ({ url }) => window.location.assign(url),
+  });
+  const changePlan = useMutation({
+    mutationFn: ({ planKey, replacePending }: { planKey: ManagedPlanKey; replacePending: boolean }) =>
+      post<{ action: "redirect" | "scheduled"; url?: string }>("/billing/plan-change", { planKey, replacePending }),
+    onSuccess: async (result) => {
+      if (result.action === "redirect" && result.url) {
+        window.location.assign(result.url);
+        return;
+      }
+      setSelectedPlan(null);
+      await queryClient.invalidateQueries({ queryKey: ["managed-billing-summary"] });
+    },
+  });
+  const cancelPlanChange = useMutation({
+    mutationFn: () => remove<{ cancelled: boolean }>("/billing/plan-change"),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["managed-billing-summary"] }),
+  });
+  const cancelSubscription = useMutation({
+    mutationFn: (replacePending: boolean) => post<{ url: string }>("/billing/cancellation-session", { replacePending }),
+    onSuccess: ({ url }) => window.location.assign(url),
+  });
+  const reactivate = useMutation({
+    mutationFn: () => post<{ reactivated: boolean }>("/billing/reactivate"),
+    onSuccess: async () => queryClient.invalidateQueries({ queryKey: ["managed-billing-summary"] }),
+  });
+  const selectedChangeKind = summary?.plans.find((plan) => plan.key === selectedPlan)?.changeKind;
+  const downgradePreview = useQuery({
+    queryKey: ["billing-plan-change-preview", selectedPlan],
+    queryFn: () => api<PlanTransitionPreview>(`/billing/plan-change-preview?planKey=${encodeURIComponent(selectedPlan as string)}`),
+    enabled: Boolean(selectedPlan && selectedChangeKind === "downgrade"),
+  });
+
+  useEffect(() => {
+    const value = summary;
+    if (!value || !processing) return;
+    const expectedPlan = billingParams.get("expected_plan");
+    const planFinished = billingParams.get("plan_change") === "processing" && expectedPlan === value.planKey;
+    const cancellationFinished = billingParams.get("cancellation") === "processing" && value.cancelAtPeriodEnd;
+    const checkoutFinished = billingParams.get("checkout") === "success" && value.subscriptionStatus !== "pending";
+    if (!planFinished && !cancellationFinished && !checkoutFinished) return;
+    const next = new URLSearchParams(billingParams);
+    next.delete("plan_change");
+    next.delete("expected_plan");
+    next.delete("cancellation");
+    next.delete("checkout");
+    setBillingParams(next, { replace: true });
+    if (checkoutFinished) {
+      void queryClient.invalidateQueries({ queryKey: ["session"] }).then(() => {
+        window.location.assign(onboardingDestination(value.usage.projectCount));
+      });
+    }
+  }, [billingParams, processing, queryClient, setBillingParams, summary]);
+
+  if (summaryPending) return <Skeleton className="billing-chart-skeleton" />;
+  if (!summary) return null;
+  const value = summary;
+  const managed = value.paymentMode !== "disabled";
+  const owner = session.user.role === "owner";
+  const activeSubscription = value.subscriptionStatus !== "pending" && value.subscriptionStatus !== "cancelled";
+  const changeableSubscription = value.subscriptionStatus === "active";
+  const selected = value.plans.find((plan) => plan.key === selectedPlan) ?? null;
+  const error = billingError(
+    checkout.error,
+    portal.error,
+    changePlan.error,
+    cancelPlanChange.error,
+    cancelSubscription.error,
+    reactivate.error,
+  );
+  const pendingPayment = value.subscriptionStatus === "pending";
+  return (
+    <section className={pendingPayment
+      ? "pricing-shell"
+      : managed ? "subscription-panel" : "subscription-panel billing-limits-panel"}>
+      {pendingPayment ? (
+        <div className="pricing-intro">
+          <span className="eyebrow">Choose your plan</span>
+          <h1>Start measuring your AI visibility.</h1>
+          <p>Every plan includes visibility reports, source evidence, and unlimited teammates. Choose how many prompts and sources you need.</p>
+        </div>
+      ) : null}
+      {!pendingPayment ? <CardHeader
+        title={managed ? "Belki subscription" : "Self-hosted limits"}
+        description={`${value.usage.promptCount} of ${value.usage.promptLimit} active prompts`}
+        action={managed && value.subscriptionStatus !== "pending" && owner
+          ? <Button variant="secondary" disabled={portal.isPending} onClick={() => portal.mutate()}>Manage subscription</Button>
+          : undefined}
+      /> : null}
+      {!pendingPayment ? <div className="billing-summary-grid subscription-summary-grid">
+        <BillingMetric label="Active prompts" value={`${compact(value.usage.promptCount)} / ${compact(value.usage.promptLimit)}`} detail={`${value.usage.promptLimit.toLocaleString()} prompt limit`} icon={<Gauge size={18}/>} />
+        <BillingMetric label="Projects" value={`${compact(value.usage.projectCount)} / ${compact(value.usage.projectLimit)}`} detail={`${value.usage.projectLimit.toLocaleString()} project limit · unlimited seats`} icon={<ReceiptText size={18}/>} />
+      </div> : null}
+      {value.stripeEnvironment === "test" ? (
+        <div className="billing-warning" role="status">
+          <AlertTriangle size={17} />
+          <div>
+            <strong>Stripe sandbox</strong>
+            <span>No real payment is being collected. This workspace cannot be reconciled with live Stripe credentials.</span>
+          </div>
+        </div>
+      ) : null}
+      {processing ? (
+        <div className="billing-notice" role="status">
+          Stripe confirmed your request. Belki is syncing the subscription now…
+        </div>
+      ) : null}
+      {value.pendingPlanChange ? (
+        <div className="billing-warning" role="status">
+          <CalendarDays size={17} />
+          <div>
+            <strong>{planLabel(value.pendingPlanChange.toPlanKey)} is scheduled for {value.pendingPlanChange.effectiveAt ? new Date(value.pendingPlanChange.effectiveAt).toLocaleDateString() : "the next renewal"}</strong>
+            <span>
+              Your current plan stays active until then.
+              {value.pendingPlanChange.transition?.archivedProjects.length
+                ? ` ${value.pendingPlanChange.transition.archivedProjects.length} excess project${value.pendingPlanChange.transition.archivedProjects.length === 1 ? " will" : "s will"} be archived.`
+                : " No projects will be archived."}
+              {value.pendingPlanChange.transition?.pausedPromptCount
+                ? ` ${value.pendingPlanChange.transition.pausedPromptCount} prompt${value.pendingPlanChange.transition.pausedPromptCount === 1 ? " will" : "s will"} be paused.`
+                : ""}
+            </span>
+            {value.pendingPlanChange.transition?.archivedProjects.length ? (
+              <span>Projects to archive: {value.pendingPlanChange.transition.archivedProjects.map((project) => project.name).join(", ")}.</span>
+            ) : null}
+            {value.pendingPlanChange.transition?.sourceChanges.map((change) => (
+              <span key={change.projectId}>
+                {change.projectName}: keep {change.next.map((source) => TRACKING_SOURCE_LABELS[source]).join(" and ")}.
+              </span>
+            ))}
+          </div>
+          {owner ? <Button variant="secondary" disabled={cancelPlanChange.isPending} onClick={() => cancelPlanChange.mutate()}>Keep current plan</Button> : null}
+        </div>
+      ) : null}
+      {managed && owner && (value.subscriptionStatus === "pending" || changeableSubscription) ? (
+        <div className={pendingPayment ? "pricing-grid" : "plan-comparison-grid"}>
+          {value.plans.map((plan) => (
+            <article className={`pricing-card${plan.key === "studio" ? " pricing-card-featured" : ""}`} key={plan.key}>
+              {plan.key === "studio" ? <span className="pricing-popular">Most popular</span> : null}
+              <div className="pricing-card-heading">
+                <strong>{planLabel(plan.key)}</strong>
+                <span><b>€{plan.priceEur}</b> / month</span>
+              </div>
+              <ul>
+                <li><Check size={15} /> Track up to {plan.promptLimit} prompts</li>
+                <li><Check size={15} /> {plan.projectLimit} {plan.projectLimit === 1 ? "project" : "projects"}</li>
+                <li><Check size={15} /> {plan.sourceLimit === 1
+                  ? "ChatGPT tracking"
+                  : value.availableTrackingSources.length >= plan.sourceLimit
+                    ? plan.sourceLimit === 4 ? "All 4 tracking sources" : `Choose ${plan.sourceLimit} tracking sources per project`
+                    : `${value.availableTrackingSources.map((source) => TRACKING_SOURCE_LABELS[source]).join(" and ")} available now`}</li>
+                <li><Check size={15} /> Unlimited teammates</li>
+              </ul>
+              <div className="pricing-card-action">
+                {value.subscriptionStatus === "pending" ? (
+                  <Button disabled={checkout.isPending} onClick={() => checkout.mutate(plan.key)}>Choose {planLabel(plan.key)}</Button>
+                ) : plan.changeKind === "current" ? (
+                  <Button disabled>Current</Button>
+                ) : (
+                  <Button
+                    disabled={!value.planChangesEnabled || changePlan.isPending || (value.pendingPlanChange?.toPlanKey === plan.key)}
+                    onClick={() => setSelectedPlan(plan.key)}
+                    variant={plan.changeKind === "downgrade" ? "secondary" : "default"}
+                  >
+                    {value.pendingPlanChange?.toPlanKey === plan.key ? "Scheduled" : plan.changeKind === "upgrade" ? "Upgrade" : "Downgrade"}
+                  </Button>
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : null}
+      {managed && activeSubscription && owner ? (
+        <div className="billing-subscription-actions">
+          {value.cancelAtPeriodEnd ? (
+            <><span>Your subscription will end on {new Date(value.cycleEndsAt).toLocaleDateString()}.</span><Button disabled={reactivate.isPending} onClick={() => reactivate.mutate()} variant="secondary">Reactivate</Button></>
+          ) : (
+            <Button disabled={cancelSubscription.isPending} onClick={() => setCancelOpen(true)} variant="ghost">Cancel subscription</Button>
+          )}
+        </div>
+      ) : null}
+      {!value.planChangesEnabled && value.planChangeDisabledReason && managed ? <p className="billing-help">Plan changes are unavailable: {value.planChangeDisabledReason}</p> : null}
+      {error ? <p className="form-error">{error}</p> : null}
+
+      <Dialog
+        open={Boolean(selectedPlan)}
+        onOpenChange={(open) => { if (!open) setSelectedPlan(null); }}
+        title={selected?.changeKind === "upgrade" ? `Upgrade to ${selected ? planLabel(selected.key) : "plan"}` : `Schedule ${selected ? planLabel(selected.key) : "plan"}`}
+        description={selected?.changeKind === "upgrade"
+          ? "Stripe will show the exact prorated amount and ask you to confirm before charging it."
+          : "The downgrade takes effect at renewal. Belki preserves all history, archives excess projects, pauses excess prompts, and keeps the sources supported by the new plan."}
+      >
+        {selected ? (
+          <div className="form-stack">
+            <div className="billing-change-summary">
+              <strong>€{selected.priceEur}/month</strong>
+              <span>{selected.promptLimit} prompts · {selected.projectLimit} projects · {selected.sourceLimit} source{selected.sourceLimit === 1 ? "" : "s"} per project</span>
+              {value.pendingPlanChange ? <span>This replaces the pending change to {planLabel(value.pendingPlanChange.toPlanKey)}.</span> : null}
+              {selected.changeKind === "downgrade" ? (
+                downgradePreview.isPending ? <span>Calculating the exact renewal changes…</span>
+                  : downgradePreview.data ? <>
+                    <span>
+                      {downgradePreview.data.archivedProjects.length
+                        ? `Projects to archive: ${downgradePreview.data.archivedProjects.map((project) => project.name).join(", ")}.`
+                        : "No projects will be archived."}
+                    </span>
+                    <span>
+                      {downgradePreview.data.pausedPromptCount
+                        ? `${downgradePreview.data.pausedPromptCount} prompt${downgradePreview.data.pausedPromptCount === 1 ? "" : "s"} will be paused.`
+                        : "No prompts will be paused."}
+                    </span>
+                    {downgradePreview.data.sourceChanges.map((change) => (
+                      <span key={change.projectId}>
+                        {change.projectName} will keep {change.next.map((source) => TRACKING_SOURCE_LABELS[source]).join(" and ")}.
+                      </span>
+                    ))}
+                    <span>Nothing is deleted. You can restore archived projects and reactivate prompts after upgrading.</span>
+                  </> : <span>The renewal changes could not be calculated. Close this dialog and try again.</span>
+              ) : null}
+            </div>
+            <div className="dialog-actions">
+              <Button onClick={() => setSelectedPlan(null)} type="button" variant="secondary">Back</Button>
+              <Button
+                disabled={changePlan.isPending || (selected.changeKind === "downgrade" && !downgradePreview.data)}
+                onClick={() => changePlan.mutate({ planKey: selected.key, replacePending: Boolean(value.pendingPlanChange) })}
+                type="button"
+              >{changePlan.isPending ? "Opening Stripe…" : selected.changeKind === "upgrade" ? "Review in Stripe" : "Schedule downgrade"}</Button>
+            </div>
+          </div>
+        ) : null}
+      </Dialog>
+
+      <Dialog
+        open={cancelOpen}
+        onOpenChange={setCancelOpen}
+        title="Cancel subscription"
+        description={`Your plan remains active through ${new Date(value.cycleEndsAt).toLocaleDateString()}. Stripe will ask you to confirm.`}
+      >
+        <div className="form-stack">
+          {value.pendingPlanChange ? <p className="billing-help">This also removes the scheduled change to {planLabel(value.pendingPlanChange.toPlanKey)}.</p> : null}
+          <div className="dialog-actions">
+            <Button onClick={() => setCancelOpen(false)} type="button" variant="secondary">Keep subscription</Button>
+            <Button disabled={cancelSubscription.isPending} onClick={() => cancelSubscription.mutate(Boolean(value.pendingPlanChange))} type="button" variant="danger">Continue to Stripe</Button>
+          </div>
+        </div>
+      </Dialog>
+      {pendingPayment ? <p className="pricing-footnote">Secure checkout by Stripe. Cancel any time at the end of your billing period.</p> : null}
+    </section>
+  );
+}
+
+function axisCost(value: number): string {
+  if (value === 0) return "$0";
+  if (value >= 0.1) return `$${value.toFixed(2)}`;
+  if (value >= 0.01) return `$${value.toFixed(3)}`;
+  return `$${value.toFixed(4)}`;
+}
+
+function metricCost(value: number): string {
+  const maximumFractionDigits = value >= 1 ? 2 : value >= 0.01 ? 4 : 6;
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: value === 0 ? 0 : Math.min(2, maximumFractionDigits),
+    maximumFractionDigits,
+  }).format(value);
+}
+
+function BillingMetric({
+  label,
+  value,
+  detail,
+  icon,
+}: {
+  label: string;
+  value: string;
+  detail: string;
+  icon?: React.ReactNode;
+}) {
+  return (
+    <div className="billing-metric" title={`${label}: ${value}`}>
+      {icon ? <span className="billing-metric-icon">{icon}</span> : null}
+      <span className="billing-metric-copy">
+        <small>{label}</small>
+        <strong>{value}</strong>
+        <span>{detail}</span>
+      </span>
+    </div>
+  );
+}
+
+export default function BillingPage() {
+  const { projectId, projects } = useApp();
+  const queryClient = useQueryClient();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const processing = searchParams.get("checkout") === "success"
+    || searchParams.get("plan_change") === "processing"
+    || searchParams.get("cancellation") === "processing";
+  const subscription = useQuery({
+    queryKey: ["managed-billing-summary"],
+    queryFn: () => api<ManagedBillingSummary>("/billing/summary"),
+    refetchInterval: processing ? 2_000 : false,
+  });
+  const managed = subscription.data?.paymentMode !== "disabled";
+  const pendingPayment = subscription.data?.subscriptionStatus === "pending";
+  const requestedTab = searchParams.get("tab");
+  const billingTab: "plan" | "usage" = requestedTab === "plan" || requestedTab === "usage"
+    ? managed ? "plan" : requestedTab
+    : managed ? "plan" : "usage";
+  const requestedPeriod = searchParams.get("period");
+  const period: BillingPeriod = requestedPeriod === "month" ? "month" : "30d";
+  const requestedProject = searchParams.get("project");
+  const billingProjectId = projects.some((project) => project.id === requestedProject)
+    ? requestedProject
+    : null;
+  const report = useQuery({
+    queryKey: ["billing", billingProjectId ?? "all", period],
+    queryFn: () =>
+      api<BillingReport>(
+        `/analytics/billing?period=${period}${billingProjectId ? `&projectId=${billingProjectId}` : ""}`,
+      ),
+    enabled: Boolean(projectId) && subscription.isSuccess && billingTab === "usage",
+  });
+  const billingAlerts = useQuery({
+    queryKey: ["billing-alerts", billingProjectId],
+    queryFn: () => api<BillingAlerts>(`/projects/${billingProjectId}/billing-alerts`),
+    enabled: Boolean(billingProjectId) && billingTab === "usage",
+  });
+  const updateAlerts = useMutation({
+    mutationFn: (body: {
+      productEnrichmentWarningUsd?: number;
+      entityExtractionWarningUsd?: number;
+    }) => patch(`/projects/${billingProjectId}/billing-alerts`, body),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["billing-alerts", billingProjectId] }),
+        queryClient.invalidateQueries({ queryKey: ["billing"] }),
+      ]);
+    },
+  });
+
+  const setPeriod = (value: BillingPeriod) => {
+    const next = new URLSearchParams(searchParams);
+    if (value === "30d") next.delete("period");
+    else next.set("period", value);
+    setSearchParams(next, { replace: true });
+  };
+  const setBillingProject = (value: string) => {
+    const next = new URLSearchParams(searchParams);
+    if (value === "all") next.delete("project");
+    else next.set("project", value);
+    setSearchParams(next, { replace: true });
+  };
+  const setBillingTab = (value: "plan" | "usage") => {
+    const next = new URLSearchParams(searchParams);
+    if ((managed && value === "plan") || (!managed && value === "usage")) next.delete("tab");
+    else next.set("tab", value);
+    setSearchParams(next, { replace: true });
+  };
+  const warningSubmit = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    updateAlerts.mutate({
+      productEnrichmentWarningUsd: Number(data.get("productEnrichmentWarningUsd")),
+      entityExtractionWarningUsd: Number(data.get("entityExtractionWarningUsd")),
+    });
+  };
+  const periodLabel = period === "month" ? "Current month" : "Last 30 days";
+  const summary = report.data?.summary;
+  const selectedProjectName = projects.find((project) => project.id === billingProjectId)?.name;
+  const exceededAlerts = report.data?.projectAlerts.filter((alert) => alert.exceeded) ?? [];
+
+  if (subscription.isPending) return (
+    <div className="page billing-page"><Skeleton className="billing-page-skeleton" /></div>
+  );
+
+  if (subscription.isError || !subscription.data) return (
+    <div className="page billing-page page-flow">
+      <PageHeader title="Billing" description="Subscription, monthly limits, and provider usage." />
+      <EmptyState
+        title="Billing could not be loaded"
+        description="Refresh the page to try again. Your subscription and usage data have not been changed."
+        action={<Button onClick={() => void subscription.refetch()} variant="secondary">Try again</Button>}
+      />
+    </div>
+  );
+
+  if (pendingPayment) return (
+    <div className="page billing-page pricing-page">
+      <ManagedBillingPanel summary={subscription.data} summaryPending={subscription.isPending} />
+    </div>
+  );
+
+  return (
+    <div className="page billing-page page-flow">
+      <PageHeader
+        title="Billing"
+        description={billingTab === "plan"
+          ? managed ? "Manage your plan, active prompts, tracking sources, and subscription changes." : "Review the limits configured for this self-hosted workspace."
+          : billingProjectId
+          ? `Provider charges and estimated inference costs for ${selectedProjectName}.`
+          : "Workspace costs across every project, separated by workload."}
+      />
+      {!managed ? <div className="billing-tabs" role="tablist" aria-label="Billing view">
+        <button aria-selected={billingTab === "plan"} className={billingTab === "plan" ? "active" : undefined} onClick={() => setBillingTab("plan")} role="tab" type="button">Limits</button>
+        <button aria-selected={billingTab === "usage"} className={billingTab === "usage" ? "active" : undefined} onClick={() => setBillingTab("usage")} role="tab" type="button">Provider costs</button>
+      </div> : null}
+
+      {billingTab === "plan" ? (
+        <ManagedBillingPanel summary={subscription.data} summaryPending={subscription.isPending} />
+      ) : !projectId ? (
+        <NoProject />
+      ) : <>
+      <div className="billing-usage-toolbar">
+        <Select
+          ariaLabel="Billing project scope"
+          value={billingProjectId ?? "all"}
+          onValueChange={setBillingProject}
+          options={[
+            { value: "all", label: "All projects" },
+            ...projects.map((project) => ({ value: project.id, label: project.name })),
+          ]}
+        />
+        <div className="billing-period-toggle" aria-label="Billing period">
+          <button aria-pressed={period === "30d"} className={period === "30d" ? "active" : undefined} onClick={() => setPeriod("30d")} type="button">Last 30 days</button>
+          <button aria-pressed={period === "month"} className={period === "month" ? "active" : undefined} onClick={() => setPeriod("month")} type="button">Current month</button>
+        </div>
+      </div>
+      <p className="billing-usage-explainer">
+        Each enabled AI platform creates a separate provider task for every prompt. Costs are grouped by delivery tier. Scheduled ChatGPT page retention stays on the standard tier and does not by itself increase the provider task price.
+      </p>
+
+      {exceededAlerts.length ? (
+        <div className="billing-warning" role="status">
+          <AlertTriangle size={17} />
+          <div>
+            <strong>{exceededAlerts.length === 1 ? "A project cost warning was reached" : `${exceededAlerts.length} project cost warnings were reached`}</strong>
+            <span>{exceededAlerts.map((alert) => `${alert.projectName} · ${alert.category === "productEnrichment" ? "Product enrichment" : "Entity extraction"}`).join(", ")}</span>
+          </div>
+        </div>
+      ) : null}
+
+      {report.isPending ? (
+        <div className="billing-summary-grid">
+          {Array.from({ length: 4 }, (_, index) => (
+            <Skeleton className="billing-metric-skeleton" key={index} />
+          ))}
+        </div>
+      ) : (
+        <div className="billing-summary-grid">
+          <BillingMetric
+            label="Total tracked cost"
+            value={metricCost(summary?.totalCost ?? 0)}
+            detail={periodLabel}
+          />
+          <BillingMetric
+            label="Charged tasks"
+            value={compact(summary?.chargedTasks ?? 0)}
+            detail="All provider and inference workloads"
+          />
+          <BillingMetric
+            label="Average per task"
+            value={metricCost(summary?.averageCost ?? 0)}
+            detail="Across provider tasks and AI calls"
+          />
+          <BillingMetric
+            label="Highest daily cost"
+            value={metricCost(summary?.highestDailyCost ?? 0)}
+            detail="Peak spend within this period"
+          />
+        </div>
+      )}
+
+      {summary ? (
+        <section className="billing-breakdown-section" aria-labelledby="cost-breakdown-heading">
+          <header>
+            <div>
+              <h2 id="cost-breakdown-heading">Cost breakdown</h2>
+              <p>Where provider spend went in this period.</p>
+            </div>
+          </header>
+          <div className="billing-breakdown-list">
+            <div className="billing-breakdown-row">
+              <div className="billing-breakdown-identity">
+                <strong>Prompt tracking</strong>
+                <span>{compact(summary.byCategory.promptTracking.chargedTasks)} provider tasks</span>
+              </div>
+              <div className="billing-breakdown-detail">
+                <span>{compact(summary.promptTrackingBreakdown.standard.chargedTasks)} standard · {formatProviderCost(summary.promptTrackingBreakdown.standard.totalCost)}</span>
+                {summary.promptTrackingBreakdown.highPriority.chargedTasks ? <span className="billing-retention-detail">{compact(summary.promptTrackingBreakdown.highPriority.chargedTasks)} high priority · {formatProviderCost(summary.promptTrackingBreakdown.highPriority.totalCost)}</span> : null}
+                {summary.promptTrackingBreakdown.live.chargedTasks ? <span>{compact(summary.promptTrackingBreakdown.live.chargedTasks)} live/manual · {formatProviderCost(summary.promptTrackingBreakdown.live.totalCost)}</span> : null}
+                <span>{compact(summary.promptTrackingBreakdown.retainedPages.chargedTasks)} ChatGPT pages retained</span>
+                {summary.promptTrackingBreakdown.bySource.map((source) => (
+                  <span key={source.source}>
+                    {source.source === "deleted_project" ? "Deleted projects" : TRACKING_SOURCE_LABELS[source.source]} · {compact(source.chargedTasks)} · {formatProviderCost(source.totalCost)}
+                  </span>
+                ))}
+                {summary.promptTrackingBreakdown.providerChargedFailures.chargedTasks ? (
+                  <span className="billing-provider-failure-detail">
+                    {compact(summary.promptTrackingBreakdown.providerChargedFailures.chargedTasks)} provider-charged {summary.promptTrackingBreakdown.providerChargedFailures.chargedTasks === 1 ? "request failed" : "requests failed"} during processing · {formatProviderCost(summary.promptTrackingBreakdown.providerChargedFailures.totalCost)} included above
+                  </span>
+                ) : null}
+              </div>
+              <div className="billing-breakdown-total">
+                <strong>{formatProviderCost(summary.byCategory.promptTracking.totalCost)}</strong>
+                <span>{summary.byCategory.promptTracking.sharePercent.toFixed(1)}% · {formatProviderCost(summary.byCategory.promptTracking.averageCost)} avg.</span>
+              </div>
+              <progress aria-label="Prompt tracking share of total cost" className="billing-cost-share prompt" max="100" value={summary.byCategory.promptTracking.sharePercent} />
+            </div>
+            <div className="billing-breakdown-row">
+              <div className="billing-breakdown-identity">
+                <strong>Entity extraction <small className="estimated-label">Estimated</small></strong>
+                <span>{compact(summary.byCategory.entityExtraction.chargedTasks)} inference calls</span>
+              </div>
+              <div className="billing-breakdown-detail">
+                <span>Named entities found in captured answers</span>
+              </div>
+              <div className="billing-breakdown-total">
+                <strong>{formatProviderCost(summary.byCategory.entityExtraction.totalCost)}</strong>
+                <span>{summary.byCategory.entityExtraction.sharePercent.toFixed(1)}% · {formatProviderCost(summary.byCategory.entityExtraction.averageCost)} avg.</span>
+              </div>
+              <progress aria-label="Entity extraction share of total cost" className="billing-cost-share entities" max="100" value={summary.byCategory.entityExtraction.sharePercent} />
+            </div>
+            <div className="billing-breakdown-row">
+              <div className="billing-breakdown-identity">
+                <strong>Product enrichment</strong>
+                <span>{compact(summary.byCategory.productEnrichment.chargedTasks)} provider tasks</span>
+              </div>
+              <div className="billing-breakdown-detail">
+                <span>Shopping product and seller details</span>
+              </div>
+              <div className="billing-breakdown-total">
+                <strong>{formatProviderCost(summary.byCategory.productEnrichment.totalCost)}</strong>
+                <span>{summary.byCategory.productEnrichment.sharePercent.toFixed(1)}% · {formatProviderCost(summary.byCategory.productEnrichment.averageCost)} avg.</span>
+              </div>
+              <progress aria-label="Product enrichment share of total cost" className="billing-cost-share enrichment" max="100" value={summary.byCategory.productEnrichment.sharePercent} />
+            </div>
+          </div>
+        </section>
+      ) : null}
+
+      <Card className="billing-chart-card">
+        <CardHeader
+          title="Daily tracked cost"
+          description={`${periodLabel} · provider charges plus estimated entity inference at list price`}
+        />
+        <div className="billing-chart">
+          {report.isPending ? (
+            <Skeleton className="billing-chart-skeleton" />
+          ) : report.isError ? (
+            <EmptyState
+              title="Billing data could not be loaded"
+              description="Refresh the page to try the report again."
+            />
+          ) : (summary?.chargedTasks ?? 0) === 0 ? (
+            <EmptyState
+              title="No tracked costs in this period"
+              description="Costs will appear after a monitored prompt or enrichment task runs."
+            />
+          ) : (
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
+              <BarChart
+                accessibilityLayer
+                data={report.data?.series ?? []}
+                margin={{ top: 8, right: 8, bottom: 0, left: 4 }}
+              >
+                <CartesianGrid
+                  stroke="#ececf0"
+                  vertical={false}
+                />
+                <XAxis
+                  axisLine={false}
+                  dataKey="date"
+                  interval="preserveStartEnd"
+                  minTickGap={38}
+                  tick={{ fill: "#71717a", fontSize: 10 }}
+                  tickFormatter={shortChartDate}
+                  tickLine={false}
+                />
+                <YAxis
+                  axisLine={false}
+                  tick={{ fill: "#71717a", fontSize: 10 }}
+                  tickFormatter={axisCost}
+                  tickLine={false}
+                  width={62}
+                />
+                <Tooltip
+                  cursor={{ fill: "#f4f4f5" }}
+                  formatter={(value, name) => [
+                    formatProviderCost(Number(value)),
+                    String(name),
+                  ]}
+                  labelFormatter={(value) => {
+                    const date =
+                      typeof value === "string"
+                        ? new Date(`${value}T00:00:00.000Z`)
+                        : null;
+                    return date && !Number.isNaN(date.getTime())
+                      ? new Intl.DateTimeFormat("en-US", {
+                      dateStyle: "medium",
+                      timeZone: "UTC",
+                        }).format(date)
+                      : "";
+                  }}
+                  isAnimationActive={false}
+                />
+                <Bar
+                  dataKey="promptTrackingStandardCost"
+                  fill="#18181b"
+                  isAnimationActive={false}
+                  maxBarSize={30}
+                  name="Prompt tracking · standard scheduled"
+                  stackId="provider-cost"
+                  radius={[0, 0, 2, 2]}
+                />
+                <Bar
+                  dataKey="promptTrackingHighPriorityCost"
+                  fill="#d97706"
+                  isAnimationActive={false}
+                  maxBarSize={30}
+                  name="Prompt tracking · high priority"
+                  stackId="provider-cost"
+                />
+                <Bar
+                  dataKey="promptTrackingLiveCost"
+                  fill="#2563eb"
+                  isAnimationActive={false}
+                  maxBarSize={30}
+                  name="Prompt tracking · live/manual"
+                  stackId="provider-cost"
+                />
+                <Bar
+                  dataKey="productEnrichmentCost"
+                  fill="#7c3aed"
+                  isAnimationActive={false}
+                  maxBarSize={30}
+                  name="Product enrichment"
+                  stackId="provider-cost"
+                  radius={[2, 2, 0, 0]}
+                />
+                <Bar
+                  dataKey="entityExtractionCost"
+                  fill="#0f766e"
+                  isAnimationActive={false}
+                  maxBarSize={30}
+                  name="Entity extraction (estimated)"
+                  stackId="provider-cost"
+                  radius={[2, 2, 0, 0]}
+                />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
+        </div>
+      </Card>
+
+      {!billingProjectId && report.data?.projectBreakdown.length ? (
+        <Card className="billing-project-table">
+          <CardHeader
+            title="Cost by project"
+            description="Workspace total separated by project and workload."
+          />
+          <DataTable
+            columns={[
+              { key: "project", label: "Project" },
+              { key: "prompt", label: "Standard scheduled" },
+              { key: "priorityPrompt", label: "High priority" },
+              { key: "livePrompt", label: "Live / manual" },
+              { key: "enrichment", label: "Product enrichment" },
+              { key: "entities", label: "Entity extraction" },
+              { key: "tasks", label: "Tasks" },
+              { key: "total", label: "Total" },
+            ]}
+            rows={report.data.projectBreakdown.map((project) => ({
+              id: project.projectId,
+              project: <strong>{project.projectName}</strong>,
+              prompt: <span>{formatProviderCost(project.promptTrackingStandardCost)} <small>{compact(project.promptTrackingStandardTasks)} tasks</small></span>,
+              priorityPrompt: <span>{formatProviderCost(project.promptTrackingHighPriorityCost)} <small>{compact(project.promptTrackingHighPriorityTasks)} tasks</small></span>,
+              livePrompt: <span>{formatProviderCost(project.promptTrackingLiveCost)} <small>{compact(project.promptTrackingLiveTasks)} tasks</small></span>,
+              enrichment: formatProviderCost(project.productEnrichmentCost),
+              entities: <span>{formatProviderCost(project.entityExtractionCost)} <small className="estimated-label">Estimated</small></span>,
+              tasks: compact(project.chargedTasks),
+              total: <strong>{formatProviderCost(project.totalCost)}</strong>,
+            }))}
+          />
+        </Card>
+      ) : null}
+
+      {billingProjectId ? (
+        <Card className="billing-alert-settings">
+          <CardHeader
+            title="Monthly cost warnings"
+            description="Warnings are specific to this project and do not pause work."
+          />
+          {billingAlerts.isPending ? (
+            <Skeleton className="billing-alert-skeleton" />
+          ) : billingAlerts.data ? (
+            <form key={billingProjectId} onSubmit={warningSubmit}>
+              <div className="billing-alert-fields">
+                <div>
+                  <Label hint={`${formatProviderCost(billingAlerts.data.productEnrichment.monthToDateCost)} this month`}>
+                    Product enrichment warning (USD)
+                  </Label>
+                  <Input
+                    defaultValue={billingAlerts.data.productEnrichment.threshold}
+                    min="0"
+                    name="productEnrichmentWarningUsd"
+                    step="0.01"
+                    type="number"
+                  />
+                </div>
+                <div>
+                  <Label hint={`${formatProviderCost(billingAlerts.data.entityExtraction.monthToDateCost)} estimated this month`}>
+                    Entity extraction warning (USD)
+                  </Label>
+                  <Input
+                    defaultValue={billingAlerts.data.entityExtraction.threshold}
+                    min="0"
+                    name="entityExtractionWarningUsd"
+                    step="0.01"
+                    type="number"
+                  />
+                </div>
+              </div>
+              {updateAlerts.isError ? <p className="form-error">Warning levels could not be saved.</p> : null}
+              <div className="billing-alert-actions">
+                <span>Set a value to 0 to disable that warning.</span>
+                <Button disabled={updateAlerts.isPending}>{updateAlerts.isPending ? "Saving…" : "Save warnings"}</Button>
+              </div>
+            </form>
+          ) : <p className="muted">Warning settings could not be loaded.</p>}
+        </Card>
+      ) : null}
+      </>}
+    </div>
+  );
+}

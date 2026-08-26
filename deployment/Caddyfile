@@ -1,0 +1,7 @@
+:80 {
+  encode zstd gzip
+  reverse_proxy web:3000 {
+    header_up -X-Auth-Request-Email
+    header_up -X-Belki-Proxy-Secret
+  }
+}
