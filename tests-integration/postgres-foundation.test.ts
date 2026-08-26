@@ -61,7 +61,7 @@ integration("PostgreSQL portable foundation", () => {
         monthlyRunCap: 1000,
       }),
     });
-    expect(setup.status).toBe(201);
+    expect(setup.status, await setup.clone().text()).toBe(201);
     expect(setup.headers.get("set-cookie")).toContain("ai_tracker_session=");
 
     const setCookie = setup.headers.get("set-cookie") ?? "";

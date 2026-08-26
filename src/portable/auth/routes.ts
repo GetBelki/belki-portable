@@ -128,7 +128,7 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies): Hono<Port
       await transaction.query(
         `INSERT INTO audit_log (
           id, workspace_id, user_id, action, resource_type, resource_id, metadata, created_at
-        ) VALUES ($1, $2, $3, 'installation.setup', 'workspace', $2, '{}'::jsonb, now())`,
+        ) VALUES ($1, $2, $3, 'installation.setup', 'workspace', $2::text, '{}'::jsonb, now())`,
         [crypto.randomUUID(), workspaceId, userId],
       );
     });
