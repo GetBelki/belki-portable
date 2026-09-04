@@ -23,6 +23,7 @@ describe("portable runtime configuration", () => {
       PAYMENT_MODE: "disabled",
       EMAIL_MODE: "disabled",
       INFERENCE_MODE: "disabled",
+      TRUST_PROXY_HEADERS: false,
     });
   });
 

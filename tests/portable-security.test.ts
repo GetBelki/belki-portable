@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { ProxyOperatorIdentity } from "../src/portable/adapters/operator-identity";
 import { loadConfig } from "../src/portable/config";
 import { hashPassword, verifyPassword } from "../src/portable/security/crypto";
+import { trustedClientIp } from "../src/portable/auth/client-ip";
 
 const config = loadConfig({
   NODE_ENV: "test",
@@ -47,5 +48,13 @@ describe("portable security adapters", () => {
     await expect(identity.authenticate(new Headers({
       "x-auth-request-email": "operator@example.com",
     }))).rejects.toThrow("untrusted_operator_identity_headers");
+  });
+
+  it("ignores forwarded client addresses unless proxy trust is explicit", () => {
+    const request = new Request("http://localhost", {
+      headers: { "x-forwarded-for": "203.0.113.20, 10.0.0.2" },
+    });
+    expect(trustedClientIp(request, { ...config, TRUST_PROXY_HEADERS: false })).toBeNull();
+    expect(trustedClientIp(request, { ...config, TRUST_PROXY_HEADERS: true })).toBe("203.0.113.20");
   });
 });

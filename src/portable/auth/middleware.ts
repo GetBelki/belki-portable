@@ -7,6 +7,7 @@ import type { PortableConfig } from "../config";
 import type { Database } from "../contracts";
 import { ApiError } from "../http";
 import { randomToken, sha256, timingSafeTextEqual } from "../security/crypto";
+import { trustedClientIp } from "./client-ip";
 
 const SESSION_COOKIE = "ai_tracker_session";
 const CSRF_COOKIE = "ai_tracker_csrf";
@@ -129,7 +130,7 @@ export async function createSession(
   }
   const token = randomToken();
   const csrf = randomToken();
-  const ip = context.req.header("x-forwarded-for")?.split(",")[0]?.trim();
+  const ip = trustedClientIp(context.req.raw, dependencies.config);
   await dependencies.database.query(
     `INSERT INTO sessions (
       id, user_id, token_hash, csrf_hash, expires_at, created_at, last_seen_at,

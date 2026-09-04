@@ -13,6 +13,7 @@ import {
   type AuthDependencies,
   type PortableAppEnv,
 } from "./middleware";
+import { trustedClientIp } from "./client-ip";
 
 interface AuthRouteDependencies extends AuthDependencies {
   emailSender: EmailSender;
@@ -138,8 +139,12 @@ export function createAuthRoutes(dependencies: AuthRouteDependencies): Hono<Port
 
   routes.post("/auth/login", zValidator("json", LoginSchema), async (context) => {
     const input = context.req.valid("json");
-    const ip = context.req.header("x-forwarded-for")?.split(",")[0]?.trim() ?? "unknown";
-    await checkLoginRateLimit(dependencies, sha256(`${input.email.toLowerCase()}|${ip}`));
+    const normalizedEmail = input.email.toLowerCase();
+    await checkLoginRateLimit(dependencies, `login:account:${sha256(normalizedEmail)}`);
+    const ip = trustedClientIp(context.req.raw, dependencies.config);
+    if (ip) {
+      await checkLoginRateLimit(dependencies, `login:ip:${sha256(ip)}`, 50);
+    }
     const result = await dependencies.database.query<LoginRow>(
       `SELECT app_user.id, app_user.status, credential.iterations,
         credential.salt, credential.password_hash

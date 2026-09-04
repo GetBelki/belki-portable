@@ -11,6 +11,7 @@ x-belki-app: &belki-app
     NODE_ENV: production
     HOST: 0.0.0.0
     PORT: 3000
+    TRUST_PROXY_HEADERS: "true"
   networks:
     - private
   restart: unless-stopped

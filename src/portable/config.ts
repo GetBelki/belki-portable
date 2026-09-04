@@ -28,6 +28,7 @@ export const PortableConfigSchema = z.object({
   PORT: integer(3000, 1, 65_535),
   LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).default("info"),
   SHUTDOWN_TIMEOUT_MS: integer(30_000, 1_000, 300_000),
+  TRUST_PROXY_HEADERS: boolean(false),
 
   DATABASE_URL: z.string().min(1),
   DATABASE_POOL_MAX: integer(20, 1, 200),

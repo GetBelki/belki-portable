@@ -70,13 +70,19 @@ describe("portable Hono app", () => {
     expect(response.status).toBe(503);
     const payload = await response.json() as {
       ready: boolean;
-      checks: { postgres: { ok: boolean; detail?: string } };
+      checkedAt: string;
     };
     expect(payload.ready).toBe(false);
-    expect(payload.checks.postgres).toMatchObject({
-      ok: false,
-      detail: "postgres_unavailable",
-    });
+    expect(payload.checkedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/u);
+    expect(payload).not.toHaveProperty("checks");
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  it("adds browser hardening headers", async () => {
+    const response = await createApp(runtime()).request("/health/live");
+    expect(response.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(response.headers.get("permissions-policy")).toContain("camera=()");
+    expect(response.headers.get("cross-origin-opener-policy")).toBe("same-origin");
   });
 
   it("preserves the public status response contract", async () => {

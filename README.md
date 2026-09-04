@@ -105,7 +105,10 @@ docker compose \
 The managed Caddy configuration authenticates `/operator*` and
 `/api/v1/operator*` through oauth2-proxy. The application accepts the resulting
 identity header only when Caddy also supplies the private shared trust secret;
-the public path strips caller-supplied identity and trust headers.
+the public path strips caller-supplied identity and trust headers. Compose also
+enables `TRUST_PROXY_HEADERS` only on the private Caddy-to-application network,
+where Caddy overwrites `X-Forwarded-For`. Keep it disabled when exposing the
+Node process directly.
 
 ## Development
 

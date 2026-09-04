@@ -12,12 +12,14 @@
       copy_headers X-Auth-Request-User X-Auth-Request-Email
     }
     reverse_proxy web:3000 {
+      header_up X-Forwarded-For {remote_host}
       header_up X-Belki-Proxy-Secret {$OIDC_TRUST_SECRET}
     }
   }
 
   handle {
     reverse_proxy web:3000 {
+      header_up X-Forwarded-For {remote_host}
       header_up -X-Auth-Request-Email
       header_up -X-Belki-Proxy-Secret
     }
